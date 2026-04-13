@@ -570,7 +570,9 @@ class LiteLLMProxyRequestSetup:
         #########################################################################################
         agent_id_from_header = headers.get("x-litellm-agent-id")
         trace_id_from_header = headers.get("x-litellm-trace-id")
-        session_id_from_header = headers.get("x-litellm-session-id")
+        session_id_from_header = headers.get("x-litellm-session-id") or headers.get(
+            "x-claude-code-session-id"
+        )
 
         if agent_id_from_header:
             metadata_from_headers["agent_id"] = agent_id_from_header

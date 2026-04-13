@@ -197,9 +197,27 @@ class DeploymentAffinityCheck(CustomLogger):
     @staticmethod
     def _get_session_id_from_metadata_dict(metadata: dict) -> Optional[str]:
         session_id = metadata.get("session_id")
-        if session_id is None:
-            return None
-        return str(session_id)
+        if session_id is not None:
+            return str(session_id)
+
+        # Fallback: Claude CLI encodes session_id inside metadata.user_id, either as a
+        # JSON string e.g. '{"device_id":"...","session_id":"6e313f89-..."}' or as a dict.
+        # If user_id is a plain string without embedded session_id, use it directly.
+        user_id = metadata.get("user_id")
+        if isinstance(user_id, dict):
+            if user_id.get("session_id"):
+                return str(user_id["session_id"])
+        elif isinstance(user_id, str) and user_id:
+            try:
+                import json as _json
+                parsed = _json.loads(user_id)
+                if isinstance(parsed, dict) and parsed.get("session_id"):
+                    return str(parsed["session_id"])
+            except Exception:
+                # Plain string user_id — use it directly as session identifier
+                return user_id
+
+        return None
 
     @staticmethod
     def _iter_metadata_dicts(request_kwargs: dict) -> List[dict]:
