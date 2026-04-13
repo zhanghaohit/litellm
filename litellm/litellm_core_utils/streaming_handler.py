@@ -630,6 +630,59 @@ class CustomStreamWrapper:
         except Exception as e:
             raise e
 
+    _DRAIN_MAX_CHUNKS = 10  # Safety cap for draining remaining stream chunks
+
+    def _drain_remaining_chunks_sync(self):
+        """
+        Drain remaining chunks from completion_stream to collect the usage-only
+        chunk before calling stream_chunk_builder.
+
+        Some providers (e.g. vLLM) send usage in a separate chunk after
+        finish_reason, which may not have been consumed when StopIteration fires.
+        """
+        if not self.send_stream_usage or self.completion_stream is None:
+            return
+        try:
+            for _drain_idx, remaining_chunk in enumerate(self.completion_stream):
+                if _drain_idx >= self._DRAIN_MAX_CHUNKS:
+                    break
+                try:
+                    processed = self.chunk_creator(remaining_chunk)
+                except (StopIteration, StopAsyncIteration):
+                    break
+                if processed is not None:
+                    self.chunks.append(processed)
+        except (StopIteration, StopAsyncIteration):
+            pass
+        except Exception as e:
+            verbose_logger.debug("Error draining remaining stream chunks: %s", e)
+
+    async def _drain_remaining_chunks_async(self):
+        """Async version of _drain_remaining_chunks_sync."""
+        if not self.send_stream_usage or self.completion_stream is None:
+            return
+        try:
+            if is_async_iterable(self.completion_stream):
+                _drain_idx = 0
+                async for remaining_chunk in self.completion_stream:
+                    _drain_idx += 1
+                    if _drain_idx > self._DRAIN_MAX_CHUNKS:
+                        break
+                    try:
+                        processed = self.chunk_creator(remaining_chunk)
+                    except (StopIteration, StopAsyncIteration):
+                        break
+                    if processed is not None:
+                        self.chunks.append(processed)
+            else:
+                # Fallback for sync iterables used in async context
+                # (e.g. boto3 bedrock streams)
+                self._drain_remaining_chunks_sync()
+        except (StopAsyncIteration, StopIteration):
+            pass
+        except Exception as e:
+            verbose_logger.debug("Error draining remaining stream chunks: %s", e)
+
     def model_response_creator(
         self, chunk: Optional[dict] = None, hidden_params: Optional[dict] = None
     ):
@@ -1816,6 +1869,12 @@ class CustomStreamWrapper:
 
         except StopIteration:
             if self.sent_last_chunk is True:
+                # Drain remaining chunks from completion_stream to collect
+                # the usage-only chunk before calling stream_chunk_builder.
+                # Some providers (e.g. vLLM) send usage in a separate chunk
+                # after finish_reason, which may not have been consumed yet.
+                self._drain_remaining_chunks_sync()
+
                 complete_streaming_response = litellm.stream_chunk_builder(
                     chunks=self.chunks,
                     messages=self.messages,
@@ -2017,6 +2076,12 @@ class CustomStreamWrapper:
                         return processed_chunk
         except (StopAsyncIteration, StopIteration):
             if self.sent_last_chunk is True:
+                # Drain remaining chunks from completion_stream to collect
+                # the usage-only chunk before calling stream_chunk_builder.
+                # Some providers (e.g. vLLM) send usage in a separate chunk
+                # after finish_reason, which may not have been consumed yet.
+                await self._drain_remaining_chunks_async()
+
                 # log the final chunk with accurate streaming values
                 complete_streaming_response = litellm.stream_chunk_builder(
                     chunks=self.chunks,
