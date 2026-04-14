@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import collections.abc
 import datetime
 import json
@@ -2082,11 +2083,17 @@ class CustomStreamWrapper:
                 # after finish_reason, which may not have been consumed yet.
                 await self._drain_remaining_chunks_async()
 
-                # log the final chunk with accurate streaming values
-                complete_streaming_response = litellm.stream_chunk_builder(
-                    chunks=self.chunks,
-                    messages=self.messages,
-                    logging_obj=self.logging_obj,
+                # Run stream_chunk_builder in a thread pool to avoid blocking
+                # the event loop on long streams (otherwise health probes and
+                # other coroutines on the same worker stall for seconds).
+                complete_streaming_response = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        litellm.stream_chunk_builder,
+                        chunks=self.chunks,
+                        messages=self.messages,
+                        logging_obj=self.logging_obj,
+                    ),
                 )
 
                 response = self.model_response_creator()
