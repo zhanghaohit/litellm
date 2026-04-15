@@ -172,7 +172,7 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
             if hasattr(self, "_client_factory") and callable(self._client_factory):
                 self.client = self._client_factory()
             else:
-                self.client = ClientSession()
+                self.client = ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_read=None, connect=None))
             # Don't return yet - check if the newly created session is valid
 
         # Check if the session itself is closed
@@ -182,7 +182,7 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
             if hasattr(self, "_client_factory") and callable(self._client_factory):
                 self.client = self._client_factory()
             else:
-                self.client = ClientSession()
+                self.client = ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_read=None, connect=None))
             return self.client
 
         # Check if the existing session is still valid for the current event loop
@@ -208,14 +208,14 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
                 if hasattr(self, "_client_factory") and callable(self._client_factory):
                     self.client = self._client_factory()
                 else:
-                    self.client = ClientSession()
+                    self.client = ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_read=None, connect=None))
 
         except (RuntimeError, AttributeError):
             # If we can't check the loop or session is invalid, recreate it
             if hasattr(self, "_client_factory") and callable(self._client_factory):
                 self.client = self._client_factory()
             else:
-                self.client = ClientSession()
+                self.client = ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_read=None, connect=None))
 
         return self.client
 
@@ -261,7 +261,15 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
             "data": data,
             "allow_redirects": False,
             "auto_decompress": False,
+            # NOTE: aiohttp's default ClientTimeout.total is 5 min. If we leave it
+            # sentinel here, long streams (e.g. 64K-token chat completions that may
+            # run > 5 min) get killed by the upstream total timeout, causing
+            # mid-stream disconnects that surface as ClientPayloadError on the
+            # downstream client. Explicitly set total=None (no limit) — the caller
+            # is expected to drive the read/request/stream timeout via the
+            # sock_read / connect / pool fields it already passes in.
             "timeout": ClientTimeout(
+                total=None,
                 sock_connect=timeout.get("connect"),
                 sock_read=timeout.get("read"),
                 connect=timeout.get("pool"),
@@ -310,7 +318,7 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
                 if hasattr(self, "_client_factory") and callable(self._client_factory):
                     self.client = self._client_factory()
                 else:
-                    self.client = ClientSession()
+                    self.client = ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_read=None, connect=None))
                 client_session = self.client
 
                 # Retry the request with the new session

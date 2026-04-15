@@ -954,7 +954,13 @@ class CustomStreamWrapper:
         if (
             is_chunk_non_empty
         ):  # cannot set content of an OpenAI Object to be an empty string
-            self.safety_checker()
+            # Run safety_checker only every REPEATED_STREAMING_CHUNK_LIMIT chunks.
+            # Running on every chunk is O(limit) pydantic attribute reads per chunk
+            # which saturates the event loop on long 64K-token streams (measured:
+            # ~138 µs/call → >800 ms/s of CPU at 6K chunks/s/worker → SIGKILL).
+            # Checking every N chunks is sufficient to detect infinite loops.
+            if len(self.chunks) % litellm.REPEATED_STREAMING_CHUNK_LIMIT == 0 and len(self.chunks) > 0:
+                self.safety_checker()
             hold, model_response_str = self.check_special_tokens(
                 chunk=completion_obj["content"],
                 finish_reason=model_response.choices[0].finish_reason,
@@ -1810,6 +1816,13 @@ class CustomStreamWrapper:
                     print_verbose(f"PROCESSED CHUNK POST CHUNK CREATOR: {response}")
 
                     if response is None:
+                        # Preserve usage-only chunks (vLLM sends them after finish_reason
+                        # with choices=[], which chunk_creator drops) for stream_chunk_builder.
+                        if (
+                            getattr(chunk, "usage", None) is not None
+                            or (isinstance(chunk, dict) and chunk.get("usage") is not None)
+                        ):
+                            self.chunks.append(chunk)
                         continue
                     if self.logging_obj.completion_start_time is None:
                         self.logging_obj._update_completion_start_time(
@@ -1986,6 +1999,15 @@ class CustomStreamWrapper:
                         chunk=chunk
                     )
                     if processed_chunk is None:
+                        # vLLM sends a usage-only chunk (choices=[], usage={...})
+                        # after finish_reason. chunk_creator drops it because it has
+                        # no choices, but we still need the usage for stream_chunk_builder
+                        # to aggregate. Preserve it in self.chunks directly.
+                        if (
+                            getattr(chunk, "usage", None) is not None
+                            or (isinstance(chunk, dict) and chunk.get("usage") is not None)
+                        ):
+                            self.chunks.append(chunk)
                         continue
 
                     if self.logging_obj.completion_start_time is None:
@@ -1993,17 +2015,30 @@ class CustomStreamWrapper:
                             completion_start_time=datetime.datetime.now()
                         )
 
-                    choice = processed_chunk.choices[0]
-                    if isinstance(choice, StreamingChoices):
-                        self.response_uptil_now += choice.delta.get("content", "") or ""
+                    # Only accumulate response text when post_call_rules are configured.
+                    # Without rules, building response_uptil_now is O(N) per chunk
+                    # (CPython str += can't do in-place realloc with refcount > 1),
+                    # wasting CPU on 64K-token streams for no benefit.
+                    if litellm.post_call_rules:
+                        choice = processed_chunk.choices[0]
+                        if isinstance(choice, StreamingChoices):
+                            self.response_uptil_now += choice.delta.get("content", "") or ""
+                        self.rules.post_call_rules(
+                            input=self.response_uptil_now, model=self.model
+                        )
+
+                    # Append chunk to self.chunks for stream_chunk_builder (SCB) at end of stream.
+                    # model_copy() is only needed when _add_mcp_list_tools_to_first_chunk may
+                    # mutate the chunk in place on the first chunk; usage stripping below creates
+                    # a brand-new object so the stored reference is never mutated by that path.
+                    if not self.sent_first_chunk and (
+                        getattr(self, "_hidden_params", None)
+                        and isinstance(self._hidden_params, dict)
+                        and self._hidden_params.get("mcp_metadata", {}).get("mcp_list_tools")
+                    ):
+                        self.chunks.append(processed_chunk.model_copy())
                     else:
-                        self.response_uptil_now += ""
-                    self.rules.post_call_rules(
-                        input=self.response_uptil_now, model=self.model
-                    )
-                    # Store a shallow copy so usage stripping below
-                    # does not mutate the stored chunk.
-                    self.chunks.append(processed_chunk.model_copy())
+                        self.chunks.append(processed_chunk)
 
                     # Add mcp_list_tools to first chunk if present
                     if not self.sent_first_chunk:

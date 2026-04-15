@@ -5113,8 +5113,12 @@ async def async_data_generator(
 ):
     verbose_proxy_logger.debug("inside generator")
     try:
-        # Use a list to accumulate response segments to avoid O(n^2) string concatenation
-        str_so_far_parts: list[str] = []
+        # Maintain running string with += (CPython refcount=1 in-place optimization,
+        # amortized O(total_length)). Only build it when a callback actually needs it —
+        # "".join(list) every chunk is O(N) per chunk → O(N²) across a long stream,
+        # which stalls the event loop and starves upstream reads on 64K-token streams.
+        needs_str_so_far = bool(litellm.callbacks)
+        str_so_far: str = ""
         error_message: Optional[str] = None
         requested_model_from_client = _get_client_requested_model_for_streaming(
             request_data=request_data
@@ -5130,12 +5134,14 @@ async def async_data_generator(
                 user_api_key_dict=user_api_key_dict,
                 response=chunk,
                 data=request_data,
-                str_so_far="".join(str_so_far_parts),
+                str_so_far=str_so_far if needs_str_so_far else None,
             )
 
-            if isinstance(chunk, (ModelResponse, ModelResponseStream)):
+            if needs_str_so_far and isinstance(
+                chunk, (ModelResponse, ModelResponseStream)
+            ):
                 response_str = litellm.get_response_string(response_obj=chunk)
-                str_so_far_parts.append(response_str)
+                str_so_far += response_str
 
             chunk, model_mismatch_logged = _restamp_streaming_chunk_model(
                 chunk=chunk,
