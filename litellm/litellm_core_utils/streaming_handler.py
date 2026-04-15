@@ -954,13 +954,7 @@ class CustomStreamWrapper:
         if (
             is_chunk_non_empty
         ):  # cannot set content of an OpenAI Object to be an empty string
-            # Run safety_checker only every REPEATED_STREAMING_CHUNK_LIMIT chunks.
-            # Running on every chunk is O(limit) pydantic attribute reads per chunk
-            # which saturates the event loop on long 64K-token streams (measured:
-            # ~138 µs/call → >800 ms/s of CPU at 6K chunks/s/worker → SIGKILL).
-            # Checking every N chunks is sufficient to detect infinite loops.
-            if len(self.chunks) % litellm.REPEATED_STREAMING_CHUNK_LIMIT == 0 and len(self.chunks) > 0:
-                self.safety_checker()
+            self.safety_checker()
             hold, model_response_str = self.check_special_tokens(
                 chunk=completion_obj["content"],
                 finish_reason=model_response.choices[0].finish_reason,
