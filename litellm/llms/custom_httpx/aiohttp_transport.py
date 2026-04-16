@@ -268,10 +268,14 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
             # downstream client. Explicitly set total=None (no limit) — the caller
             # is expected to drive the read/request/stream timeout via the
             # sock_read / connect / pool fields it already passes in.
+            #
+            # NOTE: sock_read is the per-read() timeout (time without receiving any
+            # data). We always set it to None to avoid spurious disconnects on slow
+            # or bursty long-running streams.
             "timeout": ClientTimeout(
                 total=None,
                 sock_connect=timeout.get("connect"),
-                sock_read=timeout.get("read"),
+                sock_read=None,  # never impose a per-read timeout on streaming requests
                 connect=timeout.get("pool"),
             ),
             "proxy": proxy,
@@ -289,6 +293,10 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
         request: httpx.Request,
     ) -> httpx.Response:
         timeout = request.extensions.get("timeout", {})
+        # Diagnostic: log timeout dict so we can confirm what values httpx is passing
+        verbose_logger.debug(
+            f"aiohttp handle_async_request: url={request.url} timeout_extensions={timeout}"
+        )
         sni_hostname = request.extensions.get("sni_hostname")
 
         # Use helper to ensure we have a valid session for the current event loop
