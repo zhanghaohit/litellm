@@ -6265,6 +6265,29 @@ async def chat_completion(  # noqa: PLR0915
             and user_api_key_dict.org_id is not None
         ):
             data["metadata"]["user_api_key_org_id"] = user_api_key_dict.org_id
+
+    # ── Raw passthrough fast path ────────────────────────────────────────────
+    # Models flagged with `litellm_params.passthrough_raw: true` skip the full
+    # litellm pipeline (request/response transformation, pydantic round-trip,
+    # chunk_creator, streaming hooks). Applies to BOTH streaming and
+    # non-streaming — usage is extracted from the SSE tail or JSON usage field
+    # for spend tracking.
+    if llm_router is not None and llm_model_list:
+        from litellm.proxy.raw_passthrough_handler import (
+            _find_passthrough_model_cfg,
+            raw_passthrough_request,
+        )
+
+        if _find_passthrough_model_cfg(data.get("model"), llm_model_list) is not None:
+            return await raw_passthrough_request(
+                data=data,
+                llm_router=llm_router,
+                user_api_key_dict=user_api_key_dict,
+                proxy_logging_obj=proxy_logging_obj,
+                endpoint="chat_completions",
+            )
+    # ─────────────────────────────────────────────────────────────────────────
+
     base_llm_response_processor = ProxyBaseLLMRequestProcessing(data=data)
     try:
         result = await base_llm_response_processor.base_process_llm_request(
@@ -6434,6 +6457,25 @@ async def completion(  # noqa: PLR0915
                 and user_api_key_dict.org_id is not None
             ):
                 data["metadata"]["user_api_key_org_id"] = user_api_key_dict.org_id
+
+        # ── Raw passthrough fast path ────────────────────────────────────────
+        # See chat_completion endpoint for the rationale.
+        if llm_router is not None and llm_model_list:
+            from litellm.proxy.raw_passthrough_handler import (
+                _find_passthrough_model_cfg,
+                raw_passthrough_request,
+            )
+
+            if _find_passthrough_model_cfg(data.get("model"), llm_model_list) is not None:
+                return await raw_passthrough_request(
+                    data=data,
+                    llm_router=llm_router,
+                    user_api_key_dict=user_api_key_dict,
+                    proxy_logging_obj=proxy_logging_obj,
+                    endpoint="completions",
+                )
+        # ─────────────────────────────────────────────────────────────────────
+
         base_llm_response_processor = ProxyBaseLLMRequestProcessing(data=data)
         return await base_llm_response_processor.base_process_llm_request(
             request=request,

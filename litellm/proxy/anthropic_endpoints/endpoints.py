@@ -48,6 +48,28 @@ async def anthropic_response(  # noqa: PLR0915
     )
 
     data = await _read_request_body(request=request)
+
+    # ── Raw passthrough fast path ────────────────────────────────────────────
+    # Models flagged with `litellm_params.passthrough_raw: true` skip litellm's
+    # full pipeline — both streaming (SSE) and non-streaming (JSON) are
+    # forwarded byte-for-byte.
+    if llm_router is not None:
+        from litellm.proxy.proxy_server import llm_model_list as _mlist
+        from litellm.proxy.raw_passthrough_handler import (
+            _find_passthrough_model_cfg,
+            raw_passthrough_request,
+        )
+
+        if _mlist and _find_passthrough_model_cfg(data.get("model"), _mlist) is not None:
+            return await raw_passthrough_request(
+                data=data,
+                llm_router=llm_router,
+                user_api_key_dict=user_api_key_dict,
+                proxy_logging_obj=proxy_logging_obj,
+                endpoint="messages",
+            )
+    # ─────────────────────────────────────────────────────────────────────────
+
     base_llm_response_processor = ProxyBaseLLMRequestProcessing(data=data)
     try:
         result = await base_llm_response_processor.base_process_llm_request(
