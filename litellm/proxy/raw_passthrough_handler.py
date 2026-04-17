@@ -37,11 +37,57 @@ import aiohttp
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from litellm._logging import verbose_proxy_logger
+from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
+    DeploymentAffinityCheck,
+)
 
 if TYPE_CHECKING:
     from litellm.proxy._types import UserAPIKeyAuth
     from litellm.proxy.utils import ProxyLogging
     from litellm.router import Router
+
+
+# ─── session affinity ────────────────────────────────────────────────────────
+
+
+async def _write_deployment_affinity(
+    llm_router: "Router",
+    data: dict,
+    deployment: dict,
+) -> None:
+    """Write session/user-key affinity to cache after deployment selection.
+
+    Replicates the fields that router._prepare_request injects into kwargs
+    (model_info + metadata.deployment_model_name) so that
+    DeploymentAffinityCheck.async_pre_call_deployment_hook can persist
+    the session_id -> model_id mapping.
+    """
+    if not getattr(llm_router, "optional_callbacks", None):
+        return
+
+    affinity_cb: Optional[DeploymentAffinityCheck] = None
+    for cb in llm_router.optional_callbacks:
+        if isinstance(cb, DeploymentAffinityCheck):
+            affinity_cb = cb
+            break
+    if affinity_cb is None:
+        return
+
+    model_info = deployment.get("model_info", {})
+    deployment_model_name = deployment.get("model_name", "")
+
+    data["model_info"] = model_info
+    data.setdefault("metadata", {}).update(
+        {
+            "model_info": model_info,
+            "deployment_model_name": deployment_model_name,
+        }
+    )
+
+    try:
+        await affinity_cb.async_pre_call_deployment_hook(data, None)
+    except Exception as e:
+        verbose_proxy_logger.debug(f"passthrough affinity write error: {e}")
 
 
 # ─── flag lookup ─────────────────────────────────────────────────────────────
@@ -103,6 +149,7 @@ def _build_request(
     body = dict(data)
     body["model"] = upstream_model
     body.pop("metadata", None)  # litellm internal
+    body.pop("model_info", None)  # litellm internal
 
     if endpoint in ("chat_completions", "completions") and is_stream:
         # OpenAI chat/completions + legacy text completions: ask upstream
@@ -253,6 +300,10 @@ async def raw_passthrough_request(
         messages=data.get("messages"),
         request_kwargs=data,
     )
+
+    # Persist session/user-key affinity for passthrough requests.
+    await _write_deployment_affinity(llm_router, data, deployment)
+
     litellm_params = deployment["litellm_params"]
     api_base = litellm_params.get("api_base")
     if not api_base:
